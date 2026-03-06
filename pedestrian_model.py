@@ -21,6 +21,15 @@ from scipy.stats import truncnorm
 # Model Parameters
 # -----------------------------
 
+# Note: these parameters are not based on real-world data 
+# but are chosen to create a realistic simulation feel.
+#------------------------------
+# These values control the simulation behavior and can be freely adjusted.
+# ARRIVAL_RATE, CROSSING_TIPPING, and CROSSING_STEEPNESS are tunable —
+# change them to simulate busier crosswalks, more impatient pedestrians, etc.
+# WALK_SPEED_MEAN and WALK_SPEED_STD are kept from Weidmann (1993) and
+# should not be changed if you want the model to stay academically accurate.
+
 ARRIVAL_RATE       = 0.08   # λ: avg pedestrians per second (1 every ~12s)
 CROSSING_TIPPING   = 8.0    # t0: wait time (s) where crossing prob = 50%
 CROSSING_STEEPNESS = 2.5    # k: how sharply probability rises around t0
@@ -62,7 +71,7 @@ def sample_walk_speed() -> float:
     """
     Sample a walking speed from a Truncated Gaussian (Weidmann model).
     Mean = 1.34 m/s, Std = 0.26 m/s, clipped to [0.5, 2.5] m/s.
-    Unlike random.gauss + clamping, this keeps the distribution shape clean.
+    Unlike random.gauss + clamping, this keeps the distribution shape clean. (I first tried clamping, but it creates a weird  max speeds.)
     """
     a = (WALK_SPEED_MIN - WALK_SPEED_MEAN) / WALK_SPEED_STD
     b = (WALK_SPEED_MAX - WALK_SPEED_MEAN) / WALK_SPEED_STD
@@ -114,7 +123,7 @@ class PedestrianManager:
         self.next_id = 0
         self.time_until_spawn = time_until_next_arrival()
 
-    # ── Public API (used by renderer and Student B's sensor module) ──
+    # ── Public API (used by renderer and sensor module) ──
 
     def update(self, current_time: float, dt: float) -> None:
         self.spawn_if_needed(current_time, dt)
@@ -182,7 +191,7 @@ class PedestrianManager:
 # -----------------------------
 
 if __name__ == "__main__":
-    print("=== Pedestrian Model Test (30 second simulation) ===\n")
+    print("=== Pedestrian Model Test (30 second simulation) ===\n") #to test how the model works
 
     manager  = PedestrianManager()
     sim_time = 0.0
