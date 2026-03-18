@@ -34,6 +34,12 @@ class KalmanFilter():
         #Error covariance, starts large because initial state is unknown
         self.P = np.eye(4) * 1000
 
+        #Track lifecycle counters based on Li et al., 2020
+        self.hit_count = 0 #detections received
+        self.miss_count = 0 #consecutive missed detections
+        self.confirmed = False #True only after 2 hits
+        self.active = True #False when track should be dropped
+
     def predict(self):
         
         #  move state forward one timestep using motion model
@@ -41,6 +47,11 @@ class KalmanFilter():
 
         # grow uncertainty
         self.P = self.F @ self.P @ self.F.T + self.Q
+
+        #Track loss rule
+        self.miss_count += 1
+        if self.miss_count >= 5: #5 trials to drop track
+            self.active = False
 
     def update(self, x_measured, y_measured):
 
@@ -62,6 +73,15 @@ class KalmanFilter():
         I = np.eye(4)
         self.P = (I - K @ self.H) @ self.P
 
+        #Confirmation
+        self.miss_count = 0 # reset misses if successful hit
+        self.hit_count += 1 # count this detection
+        if self.hit_count >= 2:
+            self.confirmed = True #trust this track from now on
+
+    def is_valid(self) -> bool:
+        return self.confirmed and self.active
+
     # simple getter method
     def get_estimate(self, pedestrian_id):
         return {
@@ -77,5 +97,11 @@ class KalmanFilter():
         self.x = np.array([[x0], [y0], [0.0], [0.0]])
         # reset uncertainty to large value for fresh start
         self.P = np.eye(4) * 1000
+
+        #reset lifecycle state for fresh track
+        self.hit_count = 0
+        self.miss_count = 0
+        self.confirmed = False
+        self.active = True
 
 

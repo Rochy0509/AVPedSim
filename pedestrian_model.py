@@ -17,36 +17,27 @@ from dataclasses import dataclass
 from scipy.stats import truncnorm
 
 
-# -----------------------------
-# Model Parameters
-# -----------------------------
-
-# Note: these parameters are not based on real-world data 
-# but are chosen to create a realistic simulation feel.
-#------------------------------
-# These values control the simulation behavior and can be freely adjusted.
-# ARRIVAL_RATE, CROSSING_TIPPING, and CROSSING_STEEPNESS are tunable —
-# change them to simulate busier crosswalks, more impatient pedestrians, etc.
-# WALK_SPEED_MEAN and WALK_SPEED_STD are kept from Weidmann (1993) and
-# should not be changed if you want the model to stay academically accurate.
-
 ARRIVAL_RATE       = 0.08   # λ: avg pedestrians per second (1 every ~12s)
-CROSSING_TIPPING   = 8.0    # t0: wait time (s) where crossing prob = 50%
-CROSSING_STEEPNESS = 2.5    # k: how sharply probability rises around t0
+CROSSING_TIPPING   = 2.24   # mean time-to-crossing-decision (Nagulapati et al., 2025
+CROSSING_STEEPNESS = 0.8    # k: calibrated to observed range 0.81–3.76s
 WALK_SPEED_MEAN    = 1.34   # m/s (Weidmann model mean)
 WALK_SPEED_STD     = 0.26   # m/s standard deviation
 WALK_SPEED_MIN     = 0.5    # m/s minimum (slow pedestrian)
 WALK_SPEED_MAX     = 2.5    # m/s maximum (rushing pedestrian)
+
+WALKING_SPEED = 1.2 #m/s stable crossing pace
+RUNNING_SPEED = 2.2 #m/s rushed crossing under perceived danger
+TTC_DANGER_THRESHOLD = 3.0 # s TTC triggers RUNNING
 
 ROAD_LEFT_EDGE  = -4.0   # left curb (where pedestrians start)
 ROAD_RIGHT_EDGE =  4.0   # right curb (where pedestrians exit)
 CROSSWALK_X_MIN = 10.0   # start of crosswalk zone
 CROSSWALK_X_MAX = 15.0   # end of crosswalk zone
 
+# Social Force repulsion parameters (Helbing & Molnár, via Yang et al., 2024)
+SFM_A = 2.0   # repulsion strength m/s^2
+SFM_B = 3.0   # repulsion decay distance m
 
-# -----------------------------
-# Pedestrian State
-# -----------------------------
 
 @dataclass
 class Pedestrian:
@@ -61,11 +52,9 @@ class Pedestrian:
     walk_speed:   float = 1.34    # m/s, sampled once at spawn
     crossing:     bool  = False   # True when state == CROSSING
     active:       bool  = True    # False when state == EXITED
+    crossing_start_time: float = 0.0 #sim time when crossing 
+    current_ttc: float = 999.0 # default = no threat 
 
-
-# -----------------------------
-# Random Sampling Functions
-# -----------------------------
 
 def sample_walk_speed() -> float:
     """
@@ -81,9 +70,10 @@ def sample_walk_speed() -> float:
 def crossing_probability(wait_time: float) -> float:
     """
     Logistic function: probability of crossing given how long the pedestrian waited.
-    - At t=0s  → ~4%  (unlikely to immediately cross)
-    - At t=8s  → 50%  (coin flip, the tipping point)
-    - At t=16s → ~96% (very likely crossing soon)
+    Calibrated to Nagulapati et al. (2025) VR study.
+    - At t=0.81s → ~15%  (earliest observed crossings)
+    - At t=2.24s → 50%   (mean time-to-crossing-decision)
+    - At t=3.76s → ~90%  (upper range of observed decisions)
     """
     exponent = -(wait_time - CROSSING_TIPPING) / CROSSING_STEEPNESS
     return 1.0 / (1.0 + math.exp(exponent))
@@ -102,10 +92,6 @@ def random_crosswalk_x() -> float:
     return random.uniform(CROSSWALK_X_MIN, CROSSWALK_X_MAX)
 
 
-# -----------------------------
-# Pedestrian Manager
-# -----------------------------
-
 class PedestrianManager:
     """
     Manages the full lifecycle of all pedestrians in the simulation.
@@ -123,11 +109,12 @@ class PedestrianManager:
         self.next_id = 0
         self.time_until_spawn = time_until_next_arrival()
 
-    # ── Public API (used by renderer and sensor module) ──
+    # Public API
 
-    def update(self, current_time: float, dt: float) -> None:
+    def update(self, current_time: float, dt: float,
+               vehicle_pos: tuple = (0.0, 0.0)) -> None:
         self.spawn_if_needed(current_time, dt)
-        self.update_pedestrians(dt)
+        self.update_pedestrians(dt, current_time, vehicle_pos)
         self.remove_exited()
 
     def get_active_pedestrians(self) -> list:
@@ -136,9 +123,10 @@ class PedestrianManager:
 
     def get_crossing_pedestrians(self) -> list:
         """Returns only pedestrians actively crossing. Used by vehicle decision algorithm."""
-        return [p for p in self.pedestrians if p.active and p.state == "CROSSING"]
+        return [p for p in self.pedestrians
+            if p.active and p.state in ("CROSSING", "RUNNING")]
 
-    # ── Internal methods ──
+    #Internal methods
 
     def spawn_if_needed(self, current_time: float, dt: float) -> None:
         self.time_until_spawn -= dt
@@ -155,51 +143,80 @@ class PedestrianManager:
             print(f"[{current_time:.1f}s] Pedestrian {ped.id} spawned | speed={ped.walk_speed:.2f} m/s")
             self.time_until_spawn = time_until_next_arrival()
 
-    def update_pedestrians(self, dt: float) -> None:
+    def update_pedestrians(self, dt: float, current_time: float,
+                           vehicle_pos: tuple = (0.0, 0.0)) -> None:
         for ped in self.pedestrians:
             if not ped.active:
                 continue
             if ped.state == "WAITING":
-                self.update_waiting(ped, dt)
+                self.update_waiting(ped, dt, current_time)
             elif ped.state == "CROSSING":
                 self.update_crossing(ped, dt)
+            elif ped.state == "RUNNING":
+                self.update_running(ped, dt, vehicle_pos)
 
-    def update_waiting(self, ped: Pedestrian, dt: float) -> None:
+    def update_waiting(self, ped: Pedestrian, dt: float, current_time: float) -> None:
         ped.waiting_time += dt
         p_cross = crossing_probability(ped.waiting_time) * dt
         if random.random() < p_cross:
             ped.state    = "CROSSING"
             ped.crossing = True
             ped.vy       = ped.walk_speed
-            print(f"  → Pedestrian {ped.id} CROSSING | waited {ped.waiting_time:.1f}s")
+            ped.crossing_start_time = current_time
+            print(f"Pedestrian {ped.id} CROSSING | waited {ped.waiting_time:.1f}s")
 
     def update_crossing(self, ped: Pedestrian, dt: float) -> None:
-        ped.y += ped.vy * dt
+
+        if ped.current_ttc < TTC_DANGER_THRESHOLD:
+            ped.state = "RUNNING"
+            print(f"Pedestrian {ped.id} RUNNING | TTC={ped.current_ttc:.1f}s")
+            return
+
+        ped.vy  = WALKING_SPEED
+        ped.y  += ped.vy * dt
         if ped.y >= ROAD_RIGHT_EDGE:
             ped.state    = "EXITED"
             ped.crossing = False
             ped.active   = False
             ped.vy       = 0.0
-            print(f"  → Pedestrian {ped.id} EXITED")
+            print(f"Pedestrian {ped.id} EXITED")
+    
+    def update_running(self, ped: Pedestrian, dt: float,
+                       vehicle_pos: tuple = (0.0, 0.0)) -> None:
+        # Relax back to walking if danger has passed
+        if ped.current_ttc >= TTC_DANGER_THRESHOLD:
+            ped.state = "CROSSING"
+            return
+
+        boost = compute_sfm_repulsion(ped, vehicle_pos)
+        ped.vy = min(RUNNING_SPEED + boost, WALK_SPEED_MAX)
+        ped.y += ped.vy * dt
+
+        if ped.y >= ROAD_RIGHT_EDGE:
+            ped.state    = "EXITED"
+            ped.crossing = False
+            ped.active   = False
+            ped.vy       = 0.0
+            print(f"Pedestrian {ped.id} EXITED")
 
     def remove_exited(self) -> None:
         self.pedestrians = [p for p in self.pedestrians if p.active]
 
+def compute_sfm_repulsion(ped: Pedestrian, vehicle_pos: tuple) -> float:
+    dx = ped.x - vehicle_pos[0]
+    dy = ped.y - vehicle_pos[1]
+    distance = math.sqrt(dx**2 + dy**2)
 
-# -----------------------------
-# Quick Test
-# -----------------------------
+    #avoid division by zero
+    if distance < 0.1:
+        distance = 0.1
 
-if __name__ == "__main__":
-    print("=== Pedestrian Model Test (30 second simulation) ===\n") #to test how the model works
+    repulsion = SFM_A * math.exp(-distance / SFM_B)
+    return repulsion
 
-    manager  = PedestrianManager()
-    sim_time = 0.0
-    dt       = 0.1
-    end_time = 30.0
 
-    while sim_time < end_time:
-        manager.update(sim_time, dt)
-        sim_time += dt
 
-    print(f"\n=== Done. Total pedestrians spawned: {manager.next_id} ===")
+def compute_safety_margin(ped: Pedestrian, vehicle_ttc: float, current_time: float) -> float:
+    crossing_duration = current_time - ped.crossing_start_time
+    return vehicle_ttc - crossing_duration
+
