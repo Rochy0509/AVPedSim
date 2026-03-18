@@ -53,6 +53,7 @@ class Pedestrian:
     crossing:     bool  = False   # True when state == CROSSING
     active:       bool  = True    # False when state == EXITED
     crossing_start_time: float = 0.0 #sim time when crossing 
+    ttc_at_crossing_start: float = 999.0
     current_ttc: float = 999.0 # default = no threat 
 
 
@@ -163,6 +164,7 @@ class PedestrianManager:
             ped.crossing = True
             ped.vy       = ped.walk_speed
             ped.crossing_start_time = current_time
+            ped.ttc_at_crossing_start  = ped.current_ttc 
             print(f"Pedestrian {ped.id} CROSSING | waited {ped.waiting_time:.1f}s")
 
     def update_crossing(self, ped: Pedestrian, dt: float) -> None:
