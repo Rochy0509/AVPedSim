@@ -47,7 +47,7 @@ class Camera:
                     "pedestrian_id": pedestrian.id,
                     "x_measured": x_measured,
                     "y_measured": y_measured,
-                    "detected:": True
+                    "detected": True
                 })
         
         return detections

@@ -34,6 +34,18 @@ ROAD_RIGHT_EDGE =  4.0   # right curb (where pedestrians exit)
 CROSSWALK_X_MIN = 10.0   # start of crosswalk zone
 CROSSWALK_X_MAX = 15.0   # end of crosswalk zone
 
+# Jaywalking parameters
+JAYWALK_PROBABILITY = 0.25  # 25% of crossers are jaywalkers
+JAYWALK_X_MIN = -5.0        # earliest jaywalking start along road
+JAYWALK_X_MAX = 30.0        # latest jaywalking start along road
+
+# Sidewalk walker parameters
+SIDEWALK_ARRIVAL_RATE = 0.05   # avg sidewalk walkers per second
+SIDEWALK_SPEED_MEAN   = 1.0    # m/s along road axis
+SIDEWALK_Y_OFFSET     = 1.5    # how far from road edge sidewalk walkers stay
+SIDEWALK_X_MIN        = -30.0  # spawn range
+SIDEWALK_X_MAX        =  35.0  # despawn range
+
 # Social Force repulsion parameters (Helbing & Molnár, via Yang et al., 2024)
 SFM_A = 2.0   # repulsion strength m/s^2
 SFM_B = 3.0   # repulsion decay distance m
@@ -54,7 +66,9 @@ class Pedestrian:
     active:       bool  = True    # False when state == EXITED
     crossing_start_time: float = 0.0 #sim time when crossing 
     ttc_at_crossing_start: float = 999.0
-    current_ttc: float = 999.0 # default = no threat 
+    current_ttc: float = 999.0 # default = no threat
+    jaywalker:   bool  = False   # True if crossing outside crosswalk
+    sidewalk_walker: bool = False # True if just walking along sidewalk
 
 
 def sample_walk_speed() -> float:
@@ -108,13 +122,16 @@ class PedestrianManager:
     def __init__(self):
         self.pedestrians = []
         self.next_id = 0
+        self.recently_exited  = []
         self.time_until_spawn = time_until_next_arrival()
+        self.time_until_sidewalk_spawn = random.expovariate(SIDEWALK_ARRIVAL_RATE)
 
     # Public API
 
     def update(self, current_time: float, dt: float,
                vehicle_pos: tuple = (0.0, 0.0)) -> None:
         self.spawn_if_needed(current_time, dt)
+        self.spawn_sidewalk_walker(current_time, dt)
         self.update_pedestrians(dt, current_time, vehicle_pos)
         self.remove_exited()
 
@@ -132,24 +149,66 @@ class PedestrianManager:
     def spawn_if_needed(self, current_time: float, dt: float) -> None:
         self.time_until_spawn -= dt
         if self.time_until_spawn <= 0:
+            is_jaywalker = random.random() < JAYWALK_PROBABILITY
+            if is_jaywalker:
+                # Jaywalker: random x outside the crosswalk zone
+                x_pos = random.choice([
+                    random.uniform(JAYWALK_X_MIN, CROSSWALK_X_MIN - 3.0),
+                    random.uniform(CROSSWALK_X_MAX + 3.0, JAYWALK_X_MAX)
+                ])
+            else:
+                x_pos = random_crosswalk_x()
+
             ped = Pedestrian(
                 id         = self.next_id,
-                x          = random_crosswalk_x(),
+                x          = x_pos,
                 y          = ROAD_LEFT_EDGE,
                 walk_speed = sample_walk_speed(),
-                spawn_time = current_time
+                spawn_time = current_time,
+                jaywalker  = is_jaywalker
             )
             self.pedestrians.append(ped)
             self.next_id += 1
-            print(f"[{current_time:.1f}s] Pedestrian {ped.id} spawned | speed={ped.walk_speed:.2f} m/s")
+            tag = "JAYWALKER" if is_jaywalker else "crosswalk"
+            print(f"[{current_time:.1f}s] Pedestrian {ped.id} spawned ({tag}) | speed={ped.walk_speed:.2f} m/s")
             self.time_until_spawn = time_until_next_arrival()
+
+    def spawn_sidewalk_walker(self, current_time: float, dt: float) -> None:
+        self.time_until_sidewalk_spawn -= dt
+        if self.time_until_sidewalk_spawn <= 0:
+            # Pick a random side (top or bottom sidewalk)
+            side = random.choice(["top", "bottom"])
+            if side == "top":
+                y_pos = ROAD_RIGHT_EDGE + SIDEWALK_Y_OFFSET
+                direction = random.choice([-1, 1])
+            else:
+                y_pos = ROAD_LEFT_EDGE - SIDEWALK_Y_OFFSET
+                direction = random.choice([-1, 1])
+
+            x_start = SIDEWALK_X_MIN if direction > 0 else SIDEWALK_X_MAX
+
+            ped = Pedestrian(
+                id             = self.next_id,
+                x              = x_start,
+                y              = y_pos,
+                vx             = direction * SIDEWALK_SPEED_MEAN,
+                walk_speed     = SIDEWALK_SPEED_MEAN,
+                spawn_time     = current_time,
+                state          = "WALKING",
+                sidewalk_walker = True,
+            )
+            self.pedestrians.append(ped)
+            self.next_id += 1
+            self.time_until_sidewalk_spawn = random.expovariate(SIDEWALK_ARRIVAL_RATE)
 
     def update_pedestrians(self, dt: float, current_time: float,
                            vehicle_pos: tuple = (0.0, 0.0)) -> None:
         for ped in self.pedestrians:
             if not ped.active:
                 continue
-            if ped.state == "WAITING":
+            if ped.state == "WALKING":
+                self.update_sidewalk_walker(ped, dt)
+            elif ped.state == "WAITING":
                 self.update_waiting(ped, dt, current_time)
             elif ped.state == "CROSSING":
                 self.update_crossing(ped, dt)
@@ -201,8 +260,17 @@ class PedestrianManager:
             ped.vy       = 0.0
             print(f"Pedestrian {ped.id} EXITED")
 
+    def update_sidewalk_walker(self, ped: Pedestrian, dt: float) -> None:
+        ped.x += ped.vx * dt
+        # Remove when walked off the scene
+        if ped.x > SIDEWALK_X_MAX or ped.x < SIDEWALK_X_MIN:
+            ped.state  = "EXITED"
+            ped.active = False
+
     def remove_exited(self) -> None:
-        self.pedestrians = [p for p in self.pedestrians if p.active]
+        # Save exited peds before removing — simulation.py reads this
+        self.recently_exited = [p for p in self.pedestrians if not p.active]
+        self.pedestrians     = [p for p in self.pedestrians if p.active]
 
 def compute_sfm_repulsion(ped: Pedestrian, vehicle_pos: tuple) -> float:
     dx = ped.x - vehicle_pos[0]
